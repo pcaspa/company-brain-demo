@@ -1,0 +1,17 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+process.env.DB_PATH=':memory:';
+process.env.NODE_ENV='test';
+const {db,snapshot}=await import('../database.js');
+const {server}=await import('../server.js');
+await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+const base=`http://127.0.0.1:${server.address().port}`;
+const post=(path,body)=>fetch(base+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+test.after(()=>{server.close();db.close()});
+test('trading periods and contribution reconcile to underlying cost records',()=>{const s=snapshot(7);assert.equal(s.daily.length,7);assert.equal(s.period.to,'2026-11-24');assert.equal(s.contribution,s.daily.reduce((n,r)=>n+r.revenue-r.spend-r.cogs-r.shipping-r.refunds,0));assert.ok(snapshot(28).revenue>s.revenue);});
+test('inventory answers use source records and correct cover calculation',async()=>{const r=await post('/api/chat',{question:'Which inventory is at risk?'});const result=await r.json();assert.equal(r.status,200);assert.match(result.answer,/6.8 days/);assert.match(result.answer,/18-day/);assert.match(result.sources[0],/inventory/)});
+test('unsupported questions do not fabricate answers',async()=>{const r=await post('/api/chat',{question:'Who won the football?'});assert.match((await r.json()).answer,/offline demo/)});
+test('paid Claude requests require authorization',async()=>{const r=await post('/api/chat',{question:'Revenue?',mode:'claude'});assert.equal(r.status,401)});
+test('agents persist outputs and task drafts are idempotent',async()=>{assert.equal((await post('/api/agents/run',{agent:'inventory'})).status,200);assert.equal(db.prepare('SELECT COUNT(*) n FROM runs').get().n,1);await post('/api/tasks',{title:'Review replenishment'});await post('/api/tasks',{title:'Review replenishment'});assert.equal(db.prepare('SELECT COUNT(*) n FROM tasks').get().n,1)});
+test('invalid input, unknown agents and filesystem paths are rejected',async()=>{assert.equal((await post('/api/chat',{})).status,400);assert.equal((await post('/api/agents/run',{agent:'bogus'})).status,400);assert.equal((await fetch(base+'/.env')).status,404)});
+test('dashboard and report endpoints reflect selected period',async()=>{const s=await (await fetch(base+'/api/dashboard?days=14')).json();assert.equal(s.daily.length,14);const r=await (await fetch(base+'/api/report?days=14')).json();assert.match(r.text,new RegExp(s.period.from));assert.match(r.text,/No reports have been sent/)});
